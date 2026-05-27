@@ -1,3 +1,25 @@
+// MIT License
+
+// Copyright (c) 2026 Lefteris Toupis
+
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
 #ifndef ORBIT_ARENA_
 #define ORBIT_ARENA_
 
@@ -281,15 +303,11 @@ typedef oa__i32 oa__b32;
 #define OA_DEFAULT_ALLOCATION_SITE_FILE		__FILE__
 #define OA_DEFAULT_ALLOCATION_SITE_LINE		__LINE__
 
-
-
 typedef oa__u64 oa_arena_flags_kind;
 enum
 {
 	OA_ARENA_FLAG_NO_CHAIN = (1<<1),
 };
-
-
 
 typedef struct oa__arena_desc oa_arena_desc;
 struct oa__arena_desc
@@ -302,8 +320,6 @@ struct oa__arena_desc
 	oa__u32				 allocation_site_line;
 	const char 			*name;
 };
-
-
 
 typedef struct oa__arena oa_arena;
 struct oa__arena
@@ -323,8 +339,6 @@ struct oa__arena
 };
 OA_STATIC_ASSERT(sizeof(oa_arena) <= OA_ARENA_HEADER_SIZE);
 
-
-
 typedef struct oa__temp oa_temp;
 struct oa__temp
 {
@@ -332,51 +346,86 @@ struct oa__temp
 	oa__u64   pos;
 };
 
-
-
+/* Allocate an arena using the supplied descriptor.
+ *
+ * @param desc Descriptor containing reserve size, commit size, flags, optional
+ *             backing buffer, allocation site, and name metadata.
+ * @return Pointer to the allocated arena.
+ */
 OA_DEF oa_arena *oa_arena_allocate(oa_arena_desc *desc);
 
-
-
+/* Allocate an arena with the default reserve size, commit size, and flags.
+ *
+ * @param name Optional human-readable name stored on the arena for debugging
+ *             and tracking.
+ * @return Pointer to the allocated arena.
+ */
 OA_DEF oa_arena *oa_arena_alloc(const char *name);
 
-		
-
+/* Release an arena and every chained block owned by it.
+ *
+ * @param arena Arena to release. The pointer must refer to an arena allocated
+ *              by this allocator and must not be used after release.
+ */
 OA_DEF void oa_arena_release(oa_arena *arena);
 
-
-
+/* Push bytes from the arena with the requested alignment.
+ *
+ * @param arena Arena to allocate from.
+ * @param size Number of bytes to allocate.
+ * @param align Power-of-two alignment for the returned memory.
+ * @param zero When non-zero, clear the returned memory to zero.
+ * @return Pointer to the allocated memory, or NULL if the allocation cannot be
+ *         satisfied.
+ */
 OA_DEF void *oa_arena_push(oa_arena *arena, oa__u64 size, oa__u64 align, oa__b32 zero);
 #define oa_push_array_no_zero_aligned(a, T, c, align) (T *)oa_arena_push((a), sizeof(T)*(c), align, (0))
 #define oa_push_array_aligned(a, T, c, align) 		  (T *)oa_arena_push((a), sizeof(T)*(c), align, (1))
 #define oa_push_array_no_zero(a, T, c)	oa_push_array_no_zero_aligned(a, T, c, OA_MAX(8, oa__alignof(T)))
 #define oa_push_array(a, T, c)			oa_push_array_aligned(a, T, c, OA_MAX(8, oa__alignof(T)))
 
-
-
+/* Get the current absolute allocation position in the arena chain.
+ *
+ * @param arena Arena to query.
+ * @return Current allocation position, including the base position of the
+ *         active chained block.
+ */
 OA_DEF oa__u64 oa_arena_pos(oa_arena *arena);
 
-
-
+/* Pop the arena back to an absolute position.
+ *
+ * @param arena Arena to modify.
+ * @param pos Absolute position to restore. Values below the arena header size
+ *            are clamped to the first valid allocation position.
+ */
 OA_DEF void oa_arena_pop_to(oa_arena *arena, oa__u64 pos);
 
-
-
+/* Clear all allocations from the arena while keeping the root arena usable.
+ *
+ * @param arena Arena to clear.
+ */
 OA_DEF void oa_arena_clear(oa_arena *arena);
 
-
-
+/* Pop bytes from the current arena position.
+ *
+ * @param arena Arena to modify.
+ * @param amt Number of bytes to pop. If amt is greater than the current
+ *            position, the arena is popped back to the first valid position.
+ */
 OA_DEF void oa_arena_pop(oa_arena *arena, oa__u64 amt);
 
-
-
+/* Begin a temporary allocation scope by saving the arena's current position.
+ *
+ * @param arena Arena whose position should be saved.
+ * @return Temporary arena marker that can be passed to oa_arena_temp_end.
+ */
 OA_DEF oa_temp oa_arena_temp_begin(oa_arena *arena);
 
-
-
+/* End a temporary allocation scope and restore the saved arena position.
+ *
+ * @param tmp Temporary arena marker returned by oa_arena_temp_begin.
+ */
 OA_DEF void oa_arena_temp_end(oa_temp tmp);
-
-
 
 #if defined(__cplusplus)
 }
