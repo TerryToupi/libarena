@@ -139,12 +139,6 @@ extern "C"
 #define OA_ASSERT(x) do{if(!(x)) {oa__trap();}}while(0)
 #endif
 
-#if defined(__cplusplus)
-	#define oa__init_type(x) x
-#else
-	#define oa__init_type(x) (x)
-#endif
-
 #if defined(OA_COMPILER_MSVC)
 	#define OA_FORCE_INLINE __forceinline
 #elif defined(OA_COMPILER_CLANG) || defined(OA_COMPILER_GCC)
@@ -254,6 +248,12 @@ typedef oa__i32 oa__b32;
 	#endif
 #endif
 
+#if defined(__cplusplus)
+	#define oa__struct_initializer() {}
+#else
+	#define oa__struct_initializer() {0}
+#endif
+
 #define OA_KB(n)  			(((oa__u64)(n)) << 10)
 #define OA_MB(n)  			(((oa__u64)(n)) << 20)
 #define OA_GB(n)  			(((oa__u64)(n)) << 30)
@@ -280,7 +280,6 @@ typedef oa__i32 oa__b32;
 #define OA_DEFAULT_BACKING_BUFFER 			NULL
 #define OA_DEFAULT_ALLOCATION_SITE_FILE		__FILE__
 #define OA_DEFAULT_ALLOCATION_SITE_LINE		__LINE__
-#define OA_DEFAULT_NAME 					NULL	
 
 
 
@@ -299,7 +298,7 @@ struct oa__arena_desc
 	oa__u64 			 reserve_size;
 	oa__u64 			 commit_size;
 	void 				*optional_backing_buffer;
-	const char			*allocation_size_file;
+	const char			*allocation_site_file;
 	oa__u32				 allocation_site_line;
 	const char 			*name;
 };
@@ -336,31 +335,10 @@ struct oa__temp
 
 
 OA_DEF oa_arena *oa_arena_allocate(oa_arena_desc *desc);
-#if defined(__cplusplus)
-	#define oa_arena_alloc(...) 											\
-		[&]() {																\
-			oa_arena_desc desc = { 											\
-				.reserve_size = OA_DEFAULT_RESERVE_SIZE, 					\
-				.commit_size = OA_DEFAULT_COMMIT_SIZE, 						\
-				.flags = OA_DEFAULT_FLAGS, 									\
-				.allocation_site_file = OA_DEFAULT_ALLOCATION_SITE_FILE,	\
-				.allocation_site_line = OA_DEFAULT_ALLOCATION_SITE_LINE,	\
-				.name = OA_DEFAULT_NAME										\
-				__VA_ARGS__													\
-			};																\
-			return oa_arena_allocate(&desc);								\
-		}()
-#else
-	#define oa_arena_alloc(...) 										\
-		oa_arena_allocate(&(oa_arena_desc){ 							\
-			.reserve_size = OA_DEFAULT_RESERVE_SIZE, 					\
-			.commit_size = OA_DEFAULT_COMMIT_SIZE, 						\
-			.flags = OA_DEFAULT_FLAGS, 									\
-			.allocation_site_file = OA_DEFAULT_ALLOCATION_SITE_FILE,	\
-			.allocation_site_line = OA_DEFAULT_ALLOCATION_SITE_LINE,	\
-			.name = OA_DEFAULT_NAME										\
-			__VA_ARGS__})
-#endif
+
+
+
+OA_DEF oa_arena *oa_arena_alloc(const char *name);
 
 		
 
@@ -372,7 +350,7 @@ OA_DEF void *oa_arena_push(oa_arena *arena, oa__u64 size, oa__u64 align, oa__b32
 #define oa_push_array_no_zero_aligned(a, T, c, align) (T *)oa_arena_push((a), sizeof(T)*(c), align, (0))
 #define oa_push_array_aligned(a, T, c, align) 		  (T *)oa_arena_push((a), sizeof(T)*(c), align, (1))
 #define oa_push_array_no_zero(a, T, c)	oa_push_array_no_zero_aligned(a, T, c, OA_MAX(8, oa__alignof(T)))
-#define oa_push_array(a, T, c)			oa_push_array_alinged(a, T, c, OA_MAX(8, oa__alignof(T)))
+#define oa_push_array(a, T, c)			oa_push_array_aligned(a, T, c, OA_MAX(8, oa__alignof(T)))
 
 
 
@@ -426,10 +404,47 @@ OA_DEF void oa_arena_temp_end(oa_temp tmp);
 #endif
 
 #if OA_OS_WINDOWS && OA_COMPILER_MSVC
+    #include <intrin.h>
 	#pragma comment(lib, "kernel32.lib")
 #endif
 
-OA_INTERNAL oa__u64 oa__os_page_size = 0;
+OA_INTERNAL volatile oa__u32 oa__atomic_os_page_size = 0;
+
+OA_INTERNAL oa__u32
+oa__atomic_u32_ptr_eval(volatile oa__u32 *ptr)
+{
+#if OA_COMPILER_MSVC
+    return (oa__u32)_InterlockedCompareExchange((volatile long *)ptr, 0, 0);
+
+#elif OA_COMPILER_CLANG || OA_COMPILER_GCC
+    return __atomic_load_n(ptr, __ATOMIC_ACQUIRE);
+
+#else
+    #error Atomic intrinsics not defined for this compiler.
+#endif
+}
+
+OA_INTERNAL oa__b32
+oa__atomic_u32_ptr_cond_assign(volatile oa__u32 *ptr, oa__u32 e, oa__u32 v)
+{
+#if OA_COMPILER_MSVC
+    return _InterlockedCompareExchange((volatile long *)ptr, (long)v, (long)e) == (long)e;
+
+#elif OA_COMPILER_CLANG || OA_COMPILER_GCC
+    oa__u32 expected = e;
+    return __atomic_compare_exchange_n(
+        ptr,
+        &expected,
+        v,
+        0,
+        __ATOMIC_RELEASE,
+        __ATOMIC_ACQUIRE
+    );
+
+#else
+    #error Atomic intrinsics not defined for this compiler.
+#endif
+}
 
 OA_INTERNAL void *
 oa__os_reserve(oa__u64 reserve_size)
@@ -476,25 +491,30 @@ oa__os_release(void *ptr, oa__u64 release_size)
 #endif
 }
 
-// ~TODO(tps): Make this thread safe with an atomic?
 OA_INTERNAL oa__u64
 oa__os_page_size(void)
 {
-    if (oa__os_page_size == 0)
+	oa__u32 result = oa__atomic_u32_ptr_eval(&oa__atomic_os_page_size);
+
+    if (result == 0)
     {
 #if OA_OS_OSX || OA_OS_UNIX
-        long oa__os_page_size = sysconf(_SC_PAGESIZE);
-        oa__os_page_size = (oa__os_page_size > 0) ? (oa__u64)oa__os_page_size : 4096;
+        long page_size = sysconf(_SC_PAGESIZE);
+        result = (page_size > 0) ? (oa__u32)page_size : 4096;
 #elif OA_OS_WINDOWS
         SYSTEM_INFO info;
         GetSystemInfo(&info);
-        oa__os_page_size = (oa__u64)info.dwPageSize;
+        result = (oa__u32)info.dwPageSize;
 #else
         #error No supported OS for os page size!
 #endif
+        if (!oa__atomic_u32_ptr_cond_assign(&oa__atomic_os_page_size, 0, result))
+        {
+            result = oa__atomic_u32_ptr_eval(&oa__atomic_os_page_size);
+        }
     }
 
-    return oa__os_page_size;
+    return result;
 }
 
 OA_DEF oa_arena *
@@ -526,6 +546,150 @@ oa_arena_allocate(oa_arena_desc *desc)
 	arena->allocation_site_line = desc->allocation_site_line;
 	arena->name = desc->name;
 	return arena;
+}
+
+OA_DEF oa_arena *
+oa_arena_alloc(const char *name)
+{
+	oa_arena_desc desc = oa__struct_initializer();
+	desc.reserve_size = OA_DEFAULT_RESERVE_SIZE;
+	desc.commit_size = OA_DEFAULT_COMMIT_SIZE;
+	desc.flags = OA_DEFAULT_FLAGS;
+	desc.allocation_site_file = OA_DEFAULT_ALLOCATION_SITE_FILE;
+	desc.allocation_site_line = OA_DEFAULT_ALLOCATION_SITE_LINE;
+	desc.name = name;
+	oa_arena *arena = oa_arena_allocate(&desc);
+	return arena;
+}
+
+OA_DEF void *
+oa_arena_push(oa_arena *arena, oa__u64 size, oa__u64 align, oa__b32 zero)
+{
+	oa_arena *current = arena->current;
+	oa__u64 pos_pre = OA_ALIGN_POW2(current->pos, align);
+	oa__u64 pos_pst = pos_pre + size;
+
+	oa__u64 size_to_zero = 0;
+	if (zero)
+	{
+		size_to_zero = OA_MIN(current->cmt, pos_pst) - pos_pre;
+	}
+
+	if (current->res < pos_pst && !(current->flags & OA_ARENA_FLAG_NO_CHAIN))
+	{
+		oa_arena 	*new_block = 0;
+		oa__u64		 res_size = current->res_size;
+		oa__u64 	 cmt_size = current->cmt_size;
+		if (size + OA_ARENA_HEADER_SIZE > res_size)
+		{
+			res_size = OA_ALIGN_POW2(size + OA_ARENA_HEADER_SIZE, align);
+			cmt_size = OA_ALIGN_POW2(size + OA_ARENA_HEADER_SIZE, align);
+		}
+
+		oa_arena_desc desc = oa__struct_initializer();
+		desc.reserve_size 	= res_size;
+		desc.commit_size 	= cmt_size;
+		desc.flags 			= current->flags;
+		desc.allocation_site_file = current->allocation_site_file;
+		desc.allocation_site_line = current->allocation_site_line;
+		new_block = oa_arena_allocate(&desc);
+
+		new_block->base_pos = current->base_pos + current->res;
+		new_block->prev = arena->current;
+		arena->current = new_block;
+		current = new_block;
+		pos_pre = OA_ALIGN_POW2(current->pos, align);
+		pos_pst = pos_pre + size;
+	}
+
+	if (current->cmt < pos_pst)
+	{
+		oa__u64 cmt_pst_aligned = pos_pst + current->cmt_size - 1;
+		cmt_pst_aligned -= cmt_pst_aligned % current->cmt_size;
+		oa__u64 cmt_pst_clamped = OA_CLAMP_TOP(cmt_pst_aligned, current->res);
+		oa__u64 cmt_size = cmt_pst_clamped - current->cmt;
+		oa__u8 *cmt_ptr = (oa__u8 *)current + current->cmt;
+		oa__os_commit(cmt_ptr, cmt_size);
+		current->cmt = cmt_pst_clamped;
+	}
+
+	void *result = 0;
+	if (current->cmt >= pos_pst)
+	{
+		result 		 = (oa__u8 *)current + pos_pre;
+		current->pos = pos_pst;
+		memset(result, 0, size_to_zero);
+	}
+
+	return result;
+}
+
+OA_DEF void
+oa_arena_release(oa_arena *arena)
+{
+	for (oa_arena *n = arena->current, *prev = 0; n != 0; n = prev)	
+	{
+		prev = n->prev;
+		oa__os_release(n, n->res);
+	}
+}
+
+OA_DEF oa__u64
+oa_arena_pos(oa_arena *arena)
+{
+	oa_arena *current = arena->current;
+	oa__u64 pos = current->base_pos + current->pos;	
+	return pos;
+}
+
+OA_DEF void
+oa_arena_pop_to(oa_arena *arena, oa__u64 pos)
+{
+	oa__u64 big_pos = OA_CLAMP_BOT(OA_ARENA_HEADER_SIZE, pos);
+	oa_arena *current = arena->current;
+
+	for (oa_arena *prev = 0; current->base_pos >= big_pos; current = prev)
+	{
+		prev = current->prev;
+		oa__os_release(current, current->res);
+	}
+	arena->current = current;
+	oa__u64 new_pos = big_pos - current->base_pos;
+	OA_ASSERT(new_pos <= current->pos);
+	current->pos = new_pos;
+}
+
+OA_DEF void
+oa_arena_clear(oa_arena *arena)
+{
+	oa_arena_pop_to(arena, 0);
+}
+
+
+OA_DEF void
+oa_arena_pop(oa_arena *arena, oa__u64 amt)
+{
+	oa__u64 pos_old = oa_arena_pos(arena);
+	oa__u64 pos_new = pos_old;
+	if (amt < pos_old)
+	{
+		pos_new = pos_old - amt;
+	}
+	oa_arena_pop_to(arena, pos_new);
+}
+
+OA_DEF oa_temp
+oa_arena_temp_begin(oa_arena *arena)
+{
+	oa__u64 pos = oa_arena_pos(arena);
+	oa_temp temp = {arena, pos};
+	return temp;
+}
+
+OA_DEF void
+oa_arena_temp_end(oa_temp tmp)
+{
+	oa_arena_pop_to(tmp.arena, tmp.pos);
 }
 
 #endif
