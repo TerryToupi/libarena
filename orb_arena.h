@@ -426,9 +426,16 @@ OA_DEF oa_temp oa_arena_temp_begin(oa_arena *arena);
  * @param tmp Temporary arena marker returned by oa_arena_temp_begin.
  */
 OA_DEF void oa_arena_temp_end(oa_temp tmp);
-#define oa_scratch_begin(s)								og_arena_temp_begin(s);
-#define oa_scratch_push(s, T, c)						og_push_array(s.arena, T, c)
-#define oa_scratch_end(s)								og_arena_temp_end(s)
+
+/* Macros for temp scratches.
+ *
+ * @param a Arena to make the scratch start.
+ * @param T Type to push.
+ * @param s made scratch.
+ */
+#define oa_scratch_begin(a)								oa_arena_temp_begin(a);
+#define oa_scratch_push(s, T, c)						oa_push_array(s.arena, T, c)
+#define oa_scratch_end(s)								oa_arena_temp_end(s)
 
 #if defined(__cplusplus)
 }
